@@ -184,6 +184,30 @@
   .sample-thumb div { background: #101213; }
 
   /* predictions */
+  .model-input-row {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    margin-bottom: 18px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--ink-line);
+  }
+  .norm-preview {
+    flex: 0 0 auto;
+    width: 56px;
+    height: 56px;
+    display: grid;
+    grid-template-columns: repeat(8,1fr);
+    grid-template-rows: repeat(8,1fr);
+    border: 1px solid var(--ink-line);
+    background: #101213;
+  }
+  .model-input-note {
+    margin: 0;
+    font-size: 12px;
+    color: var(--paper-dim);
+    line-height: 1.5;
+  }
   .predict-stack { display: flex; flex-direction: column; gap: 16px; }
   .model-block {
     border-left: 3px solid var(--amber);
@@ -327,6 +351,10 @@
 
     <div class="panel">
       <h2>Predictions</h2>
+      <div class="model-input-row">
+        <div id="normPreview" class="norm-preview"></div>
+        <p class="model-input-note">The model always sees your stroke re-centered and stretched to fill the frame — the same bounding-box normalization used to build the original dataset. A short stroke in the middle of the pad becomes a full-height mark, just like a real training digit.</p>
+      </div>
       <div class="predict-stack">
         <div class="model-block linear">
           <div class="model-head">
@@ -471,6 +499,64 @@ document.getElementById('sampleBtn').addEventListener('click', () => {
   document.getElementById('truthNote').innerHTML = 'loaded test sample — true label <b>' + s.label + '</b>';
 });
 
+// ---------- bounding-box normalization ----------
+// The dataset's 8x8 digits are each cropped to their ink's bounding box and
+// rescaled to fill the frame before being flattened into features. A quick
+// centered stroke drawn by hand doesn't fill the frame the same way, so we
+// apply the same normalization here before classifying.
+function bboxNormalize(px) {
+  let r0 = 8, r1 = -1, c0 = 8, c1 = -1;
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      if (px[r*8+c] > 0) {
+        if (r < r0) r0 = r;
+        if (r > r1) r1 = r;
+        if (c < c0) c0 = c;
+        if (c > c1) c1 = c;
+      }
+    }
+  }
+  if (r1 < 0) return px.slice(); // blank canvas
+  const h = r1 - r0 + 1, w = c1 - c0 + 1;
+  const sub = [];
+  for (let r = r0; r <= r1; r++) sub.push(px.slice(r*8+c0, r*8+c1+1));
+  const padFrac = 0.08;
+  const target = 8 * (1 - 2*padFrac);
+  const scaleF = target / Math.max(h, w);
+  let newH = Math.min(8, Math.max(2, Math.round(h*scaleF)));
+  let newW = Math.min(8, Math.max(2, Math.round(w*scaleF)));
+  const outSub = [];
+  for (let i = 0; i < newH; i++) {
+    const si = Math.min(h-1, Math.floor(i*h/newH));
+    const row = [];
+    for (let j = 0; j < newW; j++) {
+      const sj = Math.min(w-1, Math.floor(j*w/newW));
+      row.push(sub[si][sj]);
+    }
+    outSub.push(row);
+  }
+  const out = new Array(64).fill(0);
+  const offR = Math.floor((8-newH)/2), offC = Math.floor((8-newW)/2);
+  for (let i = 0; i < newH; i++) {
+    for (let j = 0; j < newW; j++) {
+      out[(offR+i)*8 + (offC+j)] = outSub[i][j];
+    }
+  }
+  return out;
+}
+
+function renderNormPreview(normPixels) {
+  const el = document.getElementById('normPreview');
+  el.innerHTML = '';
+  for (let i = 0; i < 64; i++) {
+    const d = document.createElement('div');
+    const v = normPixels[i];
+    const g = Math.round((v/16) * 235) + 10;
+    d.style.background = v === 0 ? '#101213' : `rgb(${g},${g},${Math.round(g*0.9)})`;
+    el.appendChild(d);
+  }
+}
+
 // ---------- inference ----------
 function scaleInput(raw) {
   const out = new Array(64);
@@ -543,7 +629,9 @@ function argmax(arr) {
 }
 
 function runPredictions() {
-  const xScaled = scaleInput(pixels);
+  const normPixels = bboxNormalize(pixels);
+  renderNormPreview(normPixels);
+  const xScaled = scaleInput(normPixels);
   const lin = linearScores(xScaled);
   const rbf = rbfScores(xScaled);
   const linTop = argmax(lin);
